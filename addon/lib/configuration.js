@@ -152,6 +152,13 @@ export function parseConfiguration(configString) {
         try { config.torznabApiKey = decodeURIComponent(value); }
         catch { config.torznabApiKey = value; }
         break;
+      case 'proxy':
+        config.proxyStreams = parseBoolean(value, config.proxyStreams);
+        break;
+      case 'proxyurl':
+        try { config.proxyUrl = decodeURIComponent(value); }
+        catch { config.proxyUrl = value; }
+        break;
     }
   }
 
@@ -197,6 +204,9 @@ export function getDefaultConfiguration() {
     // Torznab (Jackett / Prowlarr)
     torznabUrl:         null,
     torznabApiKey:      null,
+    // P2P privacy proxy
+    proxyStreams:        false,
+    proxyUrl:            null,
     // Debrid keys (all null by default)
     realDebridApiKey:   null,
     premiumizeApiKey:   null,

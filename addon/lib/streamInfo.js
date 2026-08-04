@@ -4,6 +4,10 @@ import { extractQuality } from './sort.js';
 
 const ADDON_PREFIX = '⚡ Magnetio';
 
+function getPublicBaseUrl(config) {
+  return (config?._publicBaseUrl || process.env.ADDON_PUBLIC_URL || '').replace(/\/$/, '');
+}
+
 /**
  * Convert a raw torrent record into a Stremio stream object.
  */
@@ -22,19 +26,36 @@ export function toStreamInfo(record, config) {
     [seedersStr, sizeStr].filter(Boolean).join(' '),
   ].filter(Boolean).join('\n');
 
+  const baseUrl = getPublicBaseUrl(config);
+  const useProxy = config?.proxyStreams && baseUrl;
+  const fileIdx = record.fileIdx ?? undefined;
+
   const stream = {
     name,
     title: description,
     description,
-    infoHash:  record.infoHash,
-    fileIdx:   record.fileIdx ?? 0,
-    sources:   buildSources(record),
     behaviorHints: {
       bingeGroup:      getBingeGroup(record, quality),
       filename:        filename || undefined,
       videoSize:       record.size || undefined,
     },
   };
+
+  if (useProxy) {
+    const proxyParams = config.proxyUrl
+      ? `?p=${encodeURIComponent(Buffer.from(config.proxyUrl).toString('base64url'))}`
+      : '';
+    stream.url = `${baseUrl}/proxy/stream/${record.infoHash}/${fileIdx ?? 0}${proxyParams}`;
+    stream.behaviorHints.notWebReady = true;
+    const proxyLabel = config.proxyUrl ? '🛡️ VPN Proxy' : '🛡️ Privacy Proxy';
+    const proxyDesc = description + '\n' + proxyLabel;
+    stream.title = proxyDesc;
+    stream.description = proxyDesc;
+  } else {
+    stream.infoHash = record.infoHash;
+    stream.fileIdx = fileIdx;
+    stream.sources = buildSources(record);
+  }
 
   if (record.subtitles?.length) {
     stream.subtitles = enrichSubtitles(record.subtitles);

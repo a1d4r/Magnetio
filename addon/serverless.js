@@ -15,6 +15,7 @@ import { handleCommunitySubtitlesProxy } from './lib/communitySubtitles.js';
 import { handleTranslatedSubtitleProxy } from './lib/translatedSubtitles.js';
 import { trackRequest, getStats } from './lib/analytics.js';
 import { runWithClientIp } from './lib/requestContext.js';
+import { streamTorrent } from './lib/torrentProxy.js';
 
 const router = express.Router();
 
@@ -113,6 +114,36 @@ router.get('/proxy/yify/:id.srt', subtitleProxyLimiter, handleYifySubtitleProxy)
 router.get('/proxy/tvsubs/:id.srt', subtitleProxyLimiter, handleTvSubtitlesProxy);
 router.get('/proxy/community/:id.srt', subtitleProxyLimiter, handleCommunitySubtitlesProxy);
 router.get('/proxy/translated/:id.srt', subtitleProxyLimiter, handleTranslatedSubtitleProxy);
+
+const proxyStreamLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many proxy stream requests, try again later' },
+});
+
+router.get('/proxy/stream/:infoHash/:fileIdx', proxyStreamLimiter, async (req, res) => {
+  const { infoHash, fileIdx } = req.params;
+  if (!/^[a-f0-9]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  let proxyUrl = null;
+  if (req.query.p) {
+    try { proxyUrl = Buffer.from(req.query.p, 'base64url').toString('utf8'); } catch {
+      return res.status(400).json({ error: 'Invalid proxy parameter encoding' });
+    }
+    if (proxyUrl && !/^socks[45]?:\/\//i.test(proxyUrl)) {
+      return res.status(400).json({ error: 'Invalid proxy URL scheme (must be socks4:// or socks5://)' });
+    }
+  }
+  try {
+    await streamTorrent(infoHash, parseInt(fileIdx, 10) || 0, req, res, proxyUrl);
+  } catch (err) {
+    logger.error(`Proxy stream error: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Stream failed' });
+  }
+});
 
 router.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Magnetio', version: '1.1.5' });

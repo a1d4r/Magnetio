@@ -68,6 +68,7 @@ export function landingTemplate(manifest, initialConfig = {}) {
     tmdbApiKey: initialConfig.tmdbApiKey ?? '',
     torznabUrl: initialConfig.torznabUrl ?? '',
     torznabApiKey: initialConfig.torznabApiKey ?? '',
+    proxyUrl: initialConfig.proxyUrl ?? '',
     realDebridApiKey: initialConfig.realDebridApiKey ?? '',
     premiumizeApiKey: initialConfig.premiumizeApiKey ?? '',
     allDebridApiKey: initialConfig.allDebridApiKey ?? '',
@@ -923,7 +924,7 @@ export function landingTemplate(manifest, initialConfig = {}) {
         <span class="gradient-text">Stream anything.</span><br />Own your setup.
       </h1>
       <p class="hero-sub">
-        Magnetio is a self-hosted Stremio addon that aggregates torrents from 22+ providers,
+        Magnetio is a self-hosted addon for <strong>Stremio</strong> and <strong><a href="https://nuvioplugin.com" target="_blank" rel="noreferrer" style="color:var(--accent);text-decoration:none;">Nuvio</a></strong> that aggregates torrents from 22+ providers,
         resolves them through 8 debrid services, and delivers instant high-quality streams.
       </p>
       <div class="hero-buttons">
@@ -988,6 +989,11 @@ export function landingTemplate(manifest, initialConfig = {}) {
         <span class="feature-icon">&#128274;</span>
         <div class="feature-title">Self-Hosted</div>
         <div class="feature-desc">Runs on a Raspberry Pi. Your API keys never leave your server. No tracking, no telemetry.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">&#128257;</span>
+        <div class="feature-title">Stremio + Nuvio</div>
+        <div class="feature-desc">Works with both <a href="https://www.stremio.com" target="_blank" rel="noreferrer" style="color:var(--accent);">Stremio</a> and <a href="https://nuvioplugin.com" target="_blank" rel="noreferrer" style="color:var(--accent);">Nuvio</a>. Same manifest URL, same configuration — install once, use on both platforms.</div>
       </div>
     </div>
   </section>
@@ -1111,6 +1117,33 @@ export function landingTemplate(manifest, initialConfig = {}) {
           </div>
         </label>
       </div>
+    </div>
+
+    <div class="config-card" id="p2pWarningCard" style="display:none;border-color:rgba(251,191,36,0.4);">
+      <div class="config-card-title" style="color:#fbbf24;">&#9888; P2P Exposure Warning</div>
+      <div class="config-card-desc" style="color:#fbbf24;opacity:0.85;">You have no debrid service configured. Without a debrid service, streams are fetched directly via P2P (peer-to-peer), which <strong>exposes your IP address</strong> to other peers in the torrent swarm. To protect your privacy, either add a debrid API key above or enable the Privacy Proxy below and provide your own VPN/SOCKS5 proxy so that the Magnetio server routes torrent traffic through your VPN.</div>
+    </div>
+
+    <div class="config-card">
+      <div class="config-card-title">Privacy Proxy</div>
+      <div class="config-card-desc">Stream torrents through the Magnetio server instead of connecting directly to the swarm. Your device never touches the torrent network.<br /><br /><strong>Important:</strong> Without a VPN/SOCKS5 proxy configured below, the server's own IP is used for torrent connections. Each user can provide their own SOCKS5 proxy (from a VPN provider) so that all torrent traffic is routed through that VPN — keeping both you and the server operator private.</div>
+      <div class="field-grid">
+        <label>
+          P2P Privacy Proxy
+          <select id="proxyStreams">
+            <option value="0">Disabled</option>
+            <option value="1">Enabled</option>
+          </select>
+        </label>
+        <label id="proxyUrlLabel" style="display:none;">
+          Your SOCKS5 Proxy
+          <div class="password-wrap">
+            <input type="password" id="proxyUrl" autocomplete="off" placeholder="socks5://user:pass@host:1080" />
+            <button type="button" class="eye-toggle" data-target="proxyUrl" title="Toggle visibility">${SVG_EYE}</button>
+          </div>
+        </label>
+      </div>
+      <div class="config-card-desc" id="proxyHelpText" style="display:none;font-size:0.8rem;opacity:0.7;">Most VPN providers offer SOCKS5 proxy access (NordVPN, Surfshark, PIA, Mullvad, etc.). Enter the SOCKS5 address from your VPN provider above. This way, torrent traffic goes through your VPN — not through the server's IP.</div>
     </div>
 
     <div class="config-card">
@@ -1253,6 +1286,8 @@ export function landingTemplate(manifest, initialConfig = {}) {
       document.getElementById('prewarm').value = initialConfig.prewarmDebrid === false ? '0' : '1';
       document.getElementById('prewarmLimit').value = String(initialConfig.prewarmLimit || 3);
       document.getElementById('debridCatalogs').value = initialConfig.debridCatalogs === false ? '0' : '1';
+      document.getElementById('proxyStreams').value = initialConfig.proxyStreams ? '1' : '0';
+      document.getElementById('proxyUrl').value = initialConfig.proxyUrl || '';
 
       setChipGrid('qualities', initialConfig.qualities || []);
       setChipGrid('languages', initialConfig.languages || []);
@@ -1281,6 +1316,10 @@ export function landingTemplate(manifest, initialConfig = {}) {
       parts.push('prewarmLimit=' + document.getElementById('prewarmLimit').value);
       var debridCatalogsValue = document.getElementById('debridCatalogs').value;
       if (debridCatalogsValue === '0') parts.push('debridCatalogs=0');
+      var proxyValue = document.getElementById('proxyStreams').value;
+      if (proxyValue === '1') parts.push('proxy=1');
+      var proxyUrlVal = document.getElementById('proxyUrl').value.trim();
+      if (proxyUrlVal) parts.push('proxyUrl=' + encodeURIComponent(proxyUrlVal));
 
       var qualities = selectedValues('qualities');
       var languages = selectedValues('languages');
@@ -1374,7 +1413,31 @@ export function landingTemplate(manifest, initialConfig = {}) {
       observer.observe(section);
     });
 
+    function updateProxyVisibility() {
+      var enabled = document.getElementById('proxyStreams').value === '1';
+      document.getElementById('proxyUrlLabel').style.display = enabled ? '' : 'none';
+      document.getElementById('proxyHelpText').style.display = enabled ? '' : 'none';
+    }
+
+    function updateP2pWarning() {
+      var keys = ['rd','pm','ad','dl','ed','oc','tb','pu'];
+      var hasDebrid = keys.some(function(id) { return document.getElementById(id).value.trim(); });
+      document.getElementById('p2pWarningCard').style.display = hasDebrid ? 'none' : '';
+    }
+
+    document.getElementById('proxyStreams').addEventListener('change', function() {
+      updateProxyVisibility();
+      refreshPreview();
+    });
+
+    var keys_for_warning = ['rd','pm','ad','dl','ed','oc','tb','pu'];
+    keys_for_warning.forEach(function(id) {
+      document.getElementById(id).addEventListener('input', updateP2pWarning);
+    });
+
     applyInitialState();
+    updateProxyVisibility();
+    updateP2pWarning();
     refreshPreview();
   </script>
 </body>

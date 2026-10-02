@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { readFileSync } from 'node:fs';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import StremioAddonSdk from 'stremio-addon-sdk';
@@ -20,6 +21,14 @@ import { runWithClientIp } from './lib/requestContext.js';
 import { streamTorrent } from './lib/torrentProxy.js';
 
 const router = express.Router();
+// Read once at startup so health checks identify the running release, not just
+// whichever files have most recently been copied onto the server.
+const deploymentRevision = (() => {
+  try {
+    const value = readFileSync(new URL('./.deployment-revision', import.meta.url), 'utf8').trim();
+    return /^[a-f0-9]{40}$/.test(value) ? value : undefined;
+  } catch { return undefined; }
+})();
 
 // Security and CORS headers
 router.use((_req, res, next) => {
@@ -151,7 +160,7 @@ router.get('/proxy/stream/:infoHash/:fileIdx', proxyStreamLimiter, async (req, r
 });
 
 router.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'Magnetio', version: '1.2.0' });
+  res.json({ status: 'ok', service: 'Magnetio', version: '1.2.0', revision: deploymentRevision });
 });
 
 router.get('/stats', (req, res, next) => {

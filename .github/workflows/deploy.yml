@@ -100,6 +100,9 @@ jobs:
             --exclude '.DS_Store' \
             ./ "$DEPLOY_PATH/"
 
+          printf '%s\n' "$GITHUB_SHA" > "$DEPLOY_PATH/addon/.deployment-revision"
+          printf '%s\n' "$GITHUB_SHA" > "$DEPLOY_PATH/scraper/.deployment-revision"
+
       - name: Deploy with available storage
         env:
           DEPLOY_PATH: /home/peterdsp/magnetio-recovery
@@ -107,6 +110,29 @@ jobs:
         run: |
           set -euo pipefail
           "$DEPLOY_PATH/scripts/deploy-production.sh"
+
+      - name: Verify deployed source and running revision
+        env:
+          DEPLOY_PATH: /home/peterdsp/magnetio-recovery
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.js' '*.mjs' 'addon/package.json' 'scraper/package.json' 'deploy/systemd/*' 'scripts/*' |
+            while IFS= read -r -d '' path; do
+              cmp "$path" "$DEPLOY_PATH/$path"
+            done
+          systemctl is-active magnetio-addon.service magnetio-scraper.service
+          systemctl show magnetio-addon.service magnetio-scraper.service \
+            -p MainPID -p ExecMainStartTimestamp -p WorkingDirectory
+          node --input-type=module <<'NODE'
+          for (const port of [7000, 8080]) {
+            const response = await fetch(`http://127.0.0.1:${port}/health`);
+            const data = await response.json();
+            if (!response.ok || data.status !== 'ok' || data.revision !== process.env.GITHUB_SHA) {
+              throw new Error(`Wrong running release on port ${port}: ${JSON.stringify(data)}`);
+            }
+            console.log(JSON.stringify(data));
+          }
+          NODE
 
       - name: Health check
         env:

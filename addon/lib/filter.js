@@ -22,7 +22,12 @@ const SIZE_LIMITS = {
  *  5. Limit total stream count
  */
 export function applyFilters(streams, config) {
-  let result = streams;
+  // Some indexers return installer adverts among episode matches. These are
+  // not playable media and must never be offered or automatically prewarmed.
+  const installer = /\.(?:dmg|exe|msi|pkg|apk)(?:$|[\s\[\]()])/i;
+  let result = streams.filter(stream =>
+    ![stream.fileName, stream.title, stream.name].some(name => name && installer.test(name))
+  );
 
   // 1. Quality whitelist (null/unknown quality always passes through)
   if (config.qualities?.length) {

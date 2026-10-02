@@ -105,7 +105,7 @@ Everything runs on your own hardware (a Raspberry Pi is enough). No cloud subscr
                        to Stremio for playback
 ```
 
-When a torrent is already cached on your debrid service, Stremio plays it as a direct HTTP stream at full speed. No buffering, no seeding wait, no port forwarding.
+Real-Debrid results include both downloaded and uncached candidates. With Debrid prewarm enabled (the default), Magnetio starts the top three uncached results downloading in your Real-Debrid account in the background while the results list is displayed. The limit is configurable. Selecting a result reuses that preparation or starts another download, selects the requested episode/video, and redirects playback through Real-Debrid when ready. Unfinished downloads stay in the account for a later retry. Download speed and availability depend on peers and Real-Debrid; uncached files are not guaranteed to start immediately. Direct P2P fallback is not required.
 
 ---
 
@@ -262,6 +262,7 @@ https://your-server:7000/providers=yts,eztv,1337x|sort=qualityseeders|limit=10|R
 | `prewarm` | `1`, `0`, `true`, `false` | `1` | Background-add top uncached torrents to debrid |
 | `prewarmLimit` | `0` to `10` | `3` | How many uncached results to prewarm per service |
 | `p2pFallback` | `1`, `0`, `true`, `false` | `0` | Include P2P streams when a configured debrid service has no direct result |
+| `onDemand` | `1`, `0`, `true`, `false` | `1` | Show uncached Real-Debrid results and on-demand entries for DebridLink, Offcloud and Put.io |
 | `debridCatalogs` | `1`, `0`, `true`, `false` | `1` | Expose debrid cloud catalogs (Movies/Series) when a key is set |
 | `excludeSizes` | Size thresholds like `1GB,2GB` | None | Exclude streams below these sizes |
 | `maxSize` | Bytes | None | Maximum file size |
@@ -450,7 +451,7 @@ Both services use **Keyv** backed by Redis (falls back to in-memory if Redis is 
 Magnetio can proactively warm the cache and your debrid accounts:
 
 - **Scraper prewarm**: A cron job (default: daily at 4 AM) fetches the top 50 movies and 20 series from Cinemeta, scrapes all providers for each, and stores results in Redis. When a user later requests one of these titles, the response is instant.
-- **Debrid prewarm**: After filtering and sorting streams for a user request, Magnetio background-adds the top uncached torrents (configurable, default 3) to your debrid account. This is non-blocking. By the time you click play, the torrent may already be downloading or fully cached.
+- **Debrid prewarm**: After filtering and sorting streams for a user request, Magnetio background-adds the top uncached torrents (configurable, default 3) to your debrid account. This is non-blocking. Real-Debrid preparation selects the requested episode/video and is shared with playback requests, so pressing play during prewarm does not create a duplicate job. Pending jobs are retained, and repeated searches are deduplicated per account, torrent and episode. By the time you click play, the torrent may already be downloading or fully cached.
 
 ### Subtitle Sync Pipeline
 

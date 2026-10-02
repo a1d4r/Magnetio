@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { isValidToken, blacklistToken, selectVideoFile, buildDebridStream, resolveWithCache } from './mochHelper.js';
+import { isValidToken, blacklistToken, selectVideoFile, tokenScope } from './mochHelper.js';
 import { logger } from '../lib/logger.js';
 import { getClientIp } from '../lib/requestContext.js';
 
@@ -12,16 +12,17 @@ const CONTENT_ERROR_CODES = new Set([35, 36]);
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-const MAX_PROBE_CANDIDATES = 5;
+const inFlight = new Map();
+const preparing = new Map();
+const TERMINAL_STATES = new Set(['error', 'dead', 'magnet_error', 'virus']);
 
 /**
  * Check which of the given infoHashes are available on RD.
  * Returns a Map<infoHash, true>.
  *
- * RD disabled /torrents/instantAvailability in early 2025. This uses
- * the /torrents list to find already-downloaded hashes, then probes
- * a few top candidates by adding their magnet to discover CDN-cached
- * torrents that are not yet in the user's list.
+ * This is a read-only, partial view of the user's account library. Unmatched
+ * hashes remain playable candidates. Download preparation is a separate,
+ * bounded background step; this lookup never adds or deletes torrents.
  */
 export async function getCachedStreams(streams, apiKey) {
   if (!isValidToken(apiKey)) return new Map();
@@ -32,7 +33,7 @@ export async function getCachedStreams(streams, apiKey) {
   const results = new Map();
 
   try {
-    const { data: torrents } = await rdGet(`${RD_BASE}/torrents`, apiKey, { limit: 200 });
+    const { data: torrents } = await rdGet(`${RD_BASE}/torrents`, apiKey, { limit: 200 }, 2000);
     if (!Array.isArray(torrents)) return results;
 
     const hashSet = new Set(hashes.map(h => h.toLowerCase()));
@@ -43,31 +44,7 @@ export async function getCachedStreams(streams, apiKey) {
       }
     }
 
-    const unmatched = hashes
-      .map(h => h.toLowerCase())
-      .filter(h => !results.has(h));
-
-    const probes = unmatched.slice(0, MAX_PROBE_CANDIDATES);
-    await Promise.allSettled(probes.map(async (hash) => {
-      try {
-        const magnet = `magnet:?xt=urn:btih:${hash}`;
-        const { data } = await rdPost(`${RD_BASE}/torrents/addMagnet`, apiKey, { magnet });
-        if (!data?.id) return;
-
-        await rdPost(`${RD_BASE}/torrents/selectFiles/${data.id}`, apiKey, { files: 'all' });
-
-        const { data: info } = await rdGet(`${RD_BASE}/torrents/info/${data.id}`, apiKey);
-        if (info.status === 'downloaded') {
-          results.set(hash, true);
-        } else {
-          await rdDelete(`${RD_BASE}/torrents/delete/${data.id}`, apiKey);
-        }
-      } catch {
-        // probe failed, skip this hash
-      }
-    }));
-
-    logger.info(`RD cache check: ${results.size}/${hashes.length} available (${probes.length} probed)`);
+    logger.info(`RD library check: ${results.size}/${hashes.length} already downloaded`);
     return results;
   } catch (err) {
     handleRdError(err, apiKey);
@@ -80,19 +57,20 @@ export async function getCachedStreams(streams, apiKey) {
  */
 export async function resolve(stream, apiKey) {
   if (!isValidToken(apiKey)) return null;
-
-  return _resolve(stream, apiKey);
+  // A player's simultaneous/retried HTTP requests must not add duplicate jobs.
+  // Links can be IP-bound, so never share a result across account/IP contexts.
+  const scope = `${tokenScope(apiKey)}:${getClientIp() || ''}:${stream.infoHash}:${stream.fileIdx ?? 'auto'}:${stream.videoId || ''}`;
+  if (inFlight.has(scope)) return inFlight.get(scope);
+  const pending = _resolve(stream, apiKey).finally(() => inFlight.delete(scope));
+  inFlight.set(scope, pending);
+  return pending;
 }
 
 export async function prewarm(stream, apiKey) {
   if (!isValidToken(apiKey)) return false;
 
   try {
-    const torrentId = await _createOrFindTorrentId(stream.infoHash, apiKey);
-    if (!torrentId) return false;
-
-    await _selectVideoFiles(torrentId, stream.fileIdx, apiKey);
-    return true;
+    return !!(await prepareForStream(stream, apiKey));
   } catch (err) {
     handleRdError(err, apiKey);
     return false;
@@ -124,22 +102,21 @@ export async function getCatalog(apiKey, type, skip = 0) {
 
 async function _resolve(stream, apiKey) {
   try {
-    // 1. Add or find the torrent
-    const torrentId = await _createOrFindTorrentId(stream.infoHash, apiKey);
-    if (!torrentId) return null;
-
-    // 2. Select video files
-    await _selectVideoFiles(torrentId, stream.fileIdx, apiKey);
+    // Reuse prewarm's preparation, including one still running when play is pressed.
+    const prepared = await prepareForStream(stream, apiKey);
+    if (!prepared) return null;
+    const { torrentId } = prepared;
 
     // 3. Wait for the torrent to become ready
-    const torrentInfo = await _waitForReady(torrentId, apiKey);
+    const torrentInfo = prepared.info.status === 'downloaded'
+      ? prepared.info : await _waitForReady(torrentId, apiKey);
     if (!torrentInfo) return null;
 
     // 4. Unrestrict the relevant link
-    const fileLinks = torrentInfo.links;
-    const link      = stream.fileIdx != null && fileLinks[stream.fileIdx]
-      ? fileLinks[stream.fileIdx]
-      : fileLinks[0];
+    // RD links correspond to selected files, not the original torrent index.
+    const selected = (torrentInfo.files ?? []).filter(file => file.selected === 1);
+    const linkIndex = selected.findIndex(file => file.id === prepared.file.id);
+    const link = linkIndex < 0 ? null : torrentInfo.links?.[linkIndex];
 
     if (!link) return null;
     return _unrestrictLink(link, apiKey);
@@ -149,38 +126,79 @@ async function _resolve(stream, apiKey) {
   }
 }
 
-async function _createOrFindTorrentId(infoHash, apiKey) {
-  // Check if already added
-  const { data: existing } = await rdGet(`${RD_BASE}/torrents`, apiKey, { limit: 200 });
-  const found = existing.find(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
-  if (found) return found.id;
+async function prepareForStream(stream, apiKey) {
+  const scope = `${tokenScope(apiKey)}:${stream.infoHash}:${stream.fileIdx ?? 'auto'}:${stream.videoId || ''}`;
+  if (preparing.has(scope)) return preparing.get(scope);
+  const task = prepareAccountTorrent(stream, apiKey).finally(() => preparing.delete(scope));
+  preparing.set(scope, task);
+  return task;
+}
 
-  // Add new magnet
+async function prepareAccountTorrent(stream, apiKey) {
+  const { data: existing } = await rdGet(`${RD_BASE}/torrents`, apiKey, { limit: 200 });
+  const candidates = existing.filter(t => t.hash?.toLowerCase() === stream.infoHash.toLowerCase() && !TERMINAL_STATES.has(t.status));
+  for (const candidate of candidates) {
+    const prepared = await prepareVideo(candidate.id, stream, apiKey);
+    if (!prepared) return null;
+    // Do not alter another episode's selection or duplicate a later matching job.
+    if (!prepared.needsSeparateJob) return { ...prepared, torrentId: candidate.id };
+  }
+
+  const torrentId = await addTorrent(stream.infoHash, apiKey);
+  if (!torrentId) return null;
+  const prepared = await prepareVideo(torrentId, stream, apiKey);
+  return prepared && !prepared.needsSeparateJob ? { ...prepared, torrentId } : null;
+}
+
+async function addTorrent(infoHash, apiKey) {
   const magnet = `magnet:?xt=urn:btih:${infoHash}`;
   const { data } = await rdPost(`${RD_BASE}/torrents/addMagnet`, apiKey, { magnet });
   return data?.id ?? null;
 }
 
-async function _selectVideoFiles(torrentId, fileIdx, apiKey) {
-  const { data: info } = await rdGet(`${RD_BASE}/torrents/info/${torrentId}`, apiKey);
-  const files = info.files ?? [];
-
-  let selectedIds;
-  if (fileIdx != null) {
-    selectedIds = String(fileIdx + 1); // RD uses 1-based indices
-  } else {
-    const video = selectVideoFile(files.map((f, i) => ({ ...f, index: i + 1 })));
-    selectedIds = video ? String(video.index) : 'all';
+export function selectRequestedVideo(files, stream) {
+  const videos = files.filter(file => selectVideoFile([file]));
+  if (stream.fileIdx != null) {
+    const file = files[stream.fileIdx];
+    return videos.includes(file) ? file : null;
   }
+  const episode = stream.videoId?.match(/:(\d+):(\d+)$/);
+  if (episode) {
+    const [, season, number] = episode;
+    const marker = new RegExp(`(?:\\bs0*${Number(season)}[ ._-]*e0*${Number(number)}\\b|\\b0*${Number(season)}x0*${Number(number)}\\b)`, 'i');
+    const matches = videos.filter(file => marker.test(file.path ?? file.name ?? ''));
+    if (matches.length) return selectVideoFile(matches.map(file => ({ ...file, size: file.bytes ?? file.size })));
+    // Single-episode releases can lack episode markers; never guess within a pack.
+    if (videos.length !== 1 || /(?:\bs\d+[ ._-]*e\d+\b|\b\d+x\d+\b)/i.test(videos[0].path ?? videos[0].name ?? '')) return null;
+  }
+  return selectVideoFile(videos.map(file => ({ ...file, size: file.bytes ?? file.size })));
+}
 
-  await rdPost(`${RD_BASE}/torrents/selectFiles/${torrentId}`, apiKey, { files: selectedIds });
+async function prepareVideo(torrentId, stream, apiKey) {
+  // New magnets can spend time discovering metadata before file IDs exist.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { data: info } = await rdGet(`${RD_BASE}/torrents/info/${torrentId}`, apiKey);
+    if (TERMINAL_STATES.has(info.status)) return null;
+    const files = info.files ?? [];
+    if (!files.length && info.status === 'magnet_conversion') {
+      await sleep(1000);
+      continue;
+    }
+    const file = selectRequestedVideo(files, stream);
+    if (!file) return null; // Never select installers, unrelated episodes or all files.
+    if (file.selected === 1 && info.status !== 'waiting_files_selection') return { info, file };
+    if (info.status !== 'waiting_files_selection') return { needsSeparateJob: true };
+    await rdPost(`${RD_BASE}/torrents/selectFiles/${torrentId}`, apiKey, { files: String(file.id) });
+    return { info, file };
+  }
+  return null;
 }
 
 async function _waitForReady(torrentId, apiKey, retries = 10, delayMs = 2000) {
   for (let i = 0; i < retries; i++) {
     const { data } = await rdGet(`${RD_BASE}/torrents/info/${torrentId}`, apiKey);
     if (data.status === 'downloaded') return data;
-    if (['error', 'dead', 'magnet_error'].includes(data.status)) return null;
+    if (TERMINAL_STATES.has(data.status)) return null;
     await sleep(delayMs);
   }
   return null;
@@ -193,11 +211,11 @@ async function _unrestrictLink(link, apiKey) {
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
-function rdGet(url, apiKey, params = {}) {
+function rdGet(url, apiKey, params = {}, timeout = 15_000) {
   return axios.get(url, {
     headers: { Authorization: `Bearer ${apiKey}` },
     params,
-    timeout: 15_000,
+    timeout,
   });
 }
 
@@ -212,13 +230,6 @@ function rdPost(url, apiKey, data = {}) {
       Authorization:  `Bearer ${apiKey}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    timeout: 15_000,
-  });
-}
-
-function rdDelete(url, apiKey) {
-  return axios.delete(url, {
-    headers: { Authorization: `Bearer ${apiKey}` },
     timeout: 15_000,
   });
 }

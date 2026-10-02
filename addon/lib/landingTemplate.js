@@ -1150,7 +1150,7 @@ export function landingTemplate(manifest, initialConfig = {}) {
 
     <div class="config-card">
       <div class="config-card-title">Debrid Services</div>
-      <div class="config-card-desc">Add API keys for your debrid services. Cached torrents resolve as direct streams automatically.</div>
+      <div class="config-card-desc">Real-Debrid shows cached and uncached results. Enable prewarm to start the top results downloading in your account while you browse. Press play to reuse a download or start another result. Playback is ready once Real-Debrid finishes downloading.</div>
       <div class="field-grid">
         <label>
           Debrid prewarm
@@ -1176,8 +1176,8 @@ export function landingTemplate(manifest, initialConfig = {}) {
           </select>
         </label>
         <label>
-          On-demand streams for services without a cache check
-          <select id="onDemand" title="DebridLink, Offcloud and Put.io have no instant cache check. When enabled, they show on-demand entries that download to your Debrid account when you press play; when disabled, they contribute only catalogs and prewarm">
+          Download uncached results through Debrid
+          <select id="onDemand" title="Show uncached Real-Debrid, DebridLink, Offcloud and Put.io results. Press play to download through your Debrid account. Real-Debrid prewarm can start the top results ahead of time. No direct P2P connection is needed.">
             <option value="1">Enabled</option>
             <option value="0">Disabled</option>
           </select>

@@ -1,4 +1,7 @@
 import StremioAddonSdk from 'stremio-addon-sdk';
+import { tokenScope, isValidToken } from './moch/mochHelper.js';
+import { MochOptions } from './moch/options.js';
+import { getClientIp } from './lib/requestContext.js';
 import { manifest } from './lib/manifest.js';
 import { getStreams } from './lib/repository.js';
 import { applyMochs, getMochCatalog, getMochItemMeta } from './moch/moch.js';
@@ -36,6 +39,8 @@ const CACHE_TTL_ERROR  = 30;            // 30 s on error
 export async function getAddonInterface(config) {
   const addonManifest = manifest(config);
   const builder = new addonBuilder(addonManifest);
+  const configScope = tokenScope(JSON.stringify(config));
+  const hasDebrid = Object.values(MochOptions).some(service => isValidToken(config[service.configKey]));
 
   // ─── STREAM HANDLER ────────────────────────────────────────────────────────
   builder.defineStreamHandler(async ({ type, id }) => {
@@ -43,47 +48,45 @@ export async function getAddonInterface(config) {
       return { streams: [], cacheMaxAge: CACHE_TTL_EMPTY };
     }
 
-    return new Promise((resolve) => {
-      requestQueue.wrap({ id: `stream:${id}` }, async (done) => {
-        try {
-          const streams = await streamLimit(async () => {
-            // 1. Fetch raw torrent records
-            const records = await getStreams(type, id, config);
+    return requestQueue.wrap({ id: `stream:${configScope}:${getClientIp() || ''}:${type}:${id}` }, async (done) => {
+      try {
+        const streams = await streamLimit(async () => {
+          // 1. Fetch raw torrent records
+          const records = await getStreams(type, id, config);
 
-            // 2. Sort by seeders / quality
-            const sorted = sortStreams(records, config);
+          // 2. Sort by seeders / quality
+          const sorted = sortStreams(records, config);
 
-            // 3. Apply provider / quality / language filters
-            const filtered = applyFilters(sorted, config);
+          // 3. Apply provider / quality / language filters
+          const filtered = applyFilters(sorted, config);
 
-            // 4. Map to stream objects
-            const baseStreams = filtered.map(r => toStreamInfo(r, config));
+          // 4. Map to stream objects
+          const baseStreams = filtered.map(r => toStreamInfo(r, hasDebrid ? { ...config, proxyStreams: false } : config));
 
-            // 5. Apply debrid service enhancements (moch)
-            const enhanced = await applyMochs(baseStreams, config, { type, id });
+          // 5. Apply debrid service enhancements (moch)
+          const enhanced = await applyMochs(baseStreams, config, { type, id });
 
-            // 6. Inject any static streams
-            const statics = toStaticStream(id, config);
+          // 6. Inject any static streams
+          const statics = toStaticStream(id, config);
 
-            const finalStreams = applyFinalStreamLimit([...statics, ...enhanced], config);
-            logStreamSummary({ type, id, config, records, filtered, baseStreams, finalStreams });
-            return finalStreams;
-          });
+          const finalStreams = applyFinalStreamLimit([...statics, ...enhanced], config);
+          logStreamSummary({ type, id, config, records, filtered, baseStreams, finalStreams });
+          return finalStreams;
+        });
 
-          const hasStreams = streams.length > 0;
-          resolve({
-            streams,
-            cacheMaxAge: hasStreams ? CACHE_TTL_OK : CACHE_TTL_EMPTY,
-            staleRevalidate: hasStreams ? 3600 : 0,
-            staleError: hasStreams ? 14400 : 0,
-          });
-        } catch (err) {
-          logger.error(`Stream handler error [${id}]: ${err.message}`);
-          resolve({ streams: [], cacheMaxAge: CACHE_TTL_ERROR });
-        } finally {
-          done();
-        }
-      });
+        const hasStreams = streams.length > 0;
+        return {
+          streams,
+          cacheMaxAge: hasStreams ? CACHE_TTL_OK : CACHE_TTL_EMPTY,
+          staleRevalidate: hasStreams ? 3600 : 0,
+          staleError: hasStreams ? 14400 : 0,
+        };
+      } catch (err) {
+        logger.error(`Stream handler error [${id}]: ${err.message}`);
+        return { streams: [], cacheMaxAge: CACHE_TTL_ERROR };
+      } finally {
+        done();
+      }
     });
   });
 

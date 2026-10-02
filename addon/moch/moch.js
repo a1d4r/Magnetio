@@ -59,7 +59,10 @@ const ON_DEMAND_RESOLVE_TIMEOUT_MS =
  */
 export async function applyMochs(streams, config, requestContext) {
   const enabled = getEnabledMochs(config);
-  if (!enabled.length) return streams;
+  if (!enabled.length) {
+    const configured = Object.values(MochOptions).some(moch => config?.[moch.configKey]);
+    return configured && !config?.p2pFallback ? [] : streams;
+  }
 
   const directStreams = [];    // instantly-cached, resolved to a direct link
   const onDemandStreams = [];   // visible fallbacks for services without cache-check
@@ -71,6 +74,14 @@ export async function applyMochs(streams, config, requestContext) {
 
       try {
         const cachedMap = await module.getCachedStreams(streams, apiKey);
+        if (!isValidToken(apiKey, MIN_API_KEY_LENGTH)) return;
+        if (moch.resolveOnPlay) {
+          // No blocking probe downloads or per-result resolution during browsing.
+          // Missing from the account library does not mean unavailable on RD.
+          onDemandStreams.push(...buildOnDemandStreams(streams, cachedMap, moch, config, requestContext));
+          schedulePrewarm(streams, cachedMap, apiKey, moch, module, config, requestContext);
+          return;
+        }
         schedulePrewarm(streams, cachedMap, apiKey, moch, module, config);
 
         const debridResults = await Promise.allSettled(
@@ -143,11 +154,11 @@ export async function applyMochs(streams, config, requestContext) {
 }
 
 /**
- * Build visible on-demand entries for a service without a bulk cache-check.
+ * Build RD playback entries and fallbacks for services without a bulk cache-check.
  * Each entry's URL points back at the addon's own /resolve route, which does
  * the add + unrestrict on play and 302-redirects to the real link.
  */
-function buildOnDemandStreams(streams, cachedMap, moch, config) {
+function buildOnDemandStreams(streams, cachedMap, moch, config, requestContext) {
   const base = config?._publicBaseUrl;
   const configString = config?._configString;
   // Without an absolute base and the raw config segment we cannot build a
@@ -157,20 +168,27 @@ function buildOnDemandStreams(streams, cachedMap, moch, config) {
   const picked = [];
   const seen = new Set();
 
-  for (const stream of streams) {
+  const candidates = moch.resolveOnPlay
+    ? [...streams].sort((a, b) => Number(cachedMap.has(b.infoHash?.toLowerCase())) - Number(cachedMap.has(a.infoHash?.toLowerCase())))
+    : streams;
+  const limit = moch.resolveOnPlay ? Math.min(config.limit || 10, 50) : ON_DEMAND_LIMIT;
+  for (const stream of candidates) {
     const infoHash = stream.infoHash?.toLowerCase();
     if (!infoHash) continue;
-    if (cachedMap.has(infoHash)) continue; // already emitted as a direct stream
+    const ready = cachedMap.has(infoHash);
+    if (moch.resolveOnPlay ? (!ready && config.onDemand === false) : ready) continue;
 
-    const fileIdx = stream.fileIdx ?? 0;
+    const fileIdx = stream.fileIdx ?? 'auto';
     const key = `${infoHash}:${fileIdx}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const resolveUrl = `${base}/${configString}/resolve/${moch.id}/${infoHash}/${fileIdx}`;
-    picked.push(buildOnDemandStream(stream, resolveUrl, moch.name));
+    const videoId = requestContext?.id;
+    const query = videoId ? `?videoId=${encodeURIComponent(videoId)}` : '';
+    const resolveUrl = `${base}/${encodeURIComponent(configString)}/resolve/${moch.id}/${infoHash}/${fileIdx}${query}`;
+    picked.push(buildOnDemandStream(stream, resolveUrl, moch.name, ready));
 
-    if (picked.length >= ON_DEMAND_LIMIT) break;
+    if (picked.length >= limit) break;
   }
 
   return picked;
@@ -180,7 +198,7 @@ function buildOnDemandStreams(streams, cachedMap, moch, config) {
  * Resolve a single torrent on demand for a given service (used by the addon's
  * /resolve route). Returns a direct URL or null.
  */
-export async function resolveOnDemandStream(config, mochId, infoHash, fileIdx) {
+export async function resolveOnDemandStream(config, mochId, infoHash, fileIdx, videoId) {
   const entry = findMochByShortId(mochId);
   if (!entry) return null;
 
@@ -193,9 +211,9 @@ export async function resolveOnDemandStream(config, mochId, infoHash, fileIdx) {
 
   // Bound the whole resolve so the /resolve route never hangs indefinitely.
   // raceTimeout resolves to null on timeout (the underlying resolve continues
-  // in the background and warms the cache for a retry).
+  // in the background; RD keeps the account download for a retry).
   return raceTimeout(
-    () => module.resolve({ infoHash, fileIdx }, apiKey),
+    () => module.resolve({ infoHash, fileIdx, videoId }, apiKey),
     ON_DEMAND_RESOLVE_TIMEOUT_MS,
   );
 }
@@ -268,7 +286,7 @@ function findMochByShortId(shortId) {
   return { key, moch, module: MOCH_MODULES[key] };
 }
 
-function schedulePrewarm(streams, cachedMap, apiKey, moch, module, config) {
+function schedulePrewarm(streams, cachedMap, apiKey, moch, module, config, requestContext) {
   if (!config?.prewarmDebrid) return;
   if (typeof module.prewarm !== 'function') return;
 
@@ -276,9 +294,10 @@ function schedulePrewarm(streams, cachedMap, apiKey, moch, module, config) {
   if (!limit) return;
 
   const candidates = pickPrewarmCandidates(streams, cachedMap, limit);
-  for (const stream of candidates) {
+  for (const candidate of candidates) {
+    const stream = { ...candidate, videoId: requestContext?.id };
     // Per-account: warming a torrent in one user's debrid account does nothing for another's
-    const queueId = `prewarm:${moch.id}:${tokenScope(apiKey)}:${stream.infoHash}:${stream.fileIdx ?? 0}`;
+    const queueId = `prewarm:${moch.id}:${tokenScope(apiKey)}:${stream.infoHash}:${stream.fileIdx ?? 'auto'}:${stream.videoId || ''}`;
     setTimeout(() => {
       PREWARM_QUEUE.wrap({ id: queueId }, async () => {
         const cacheKey = queueId;

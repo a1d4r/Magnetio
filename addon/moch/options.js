@@ -22,6 +22,9 @@ export const MochOptions = {
     name:       'Real-Debrid',
     hasCatalog: true,
     instantAvailability: true,
+    // The account library is only a partial cache check. Keep every candidate
+    // visible and add/select/unrestrict it when the user presses play.
+    resolveOnPlay: true,
   },
   premiumize: {
     id:         'pm',

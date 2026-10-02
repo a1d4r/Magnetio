@@ -119,12 +119,15 @@ export function buildDebridStream(baseStream, url, serviceName) {
  * real debrid link. This keeps such services visibly present in the stream
  * list instead of silently contributing nothing.
  */
-export function buildOnDemandStream(baseStream, resolveUrl, serviceName) {
-  const title = `${baseStream.title ?? ''}\n⏳ On-demand via ${serviceName} - press play to cache (no instant check)`.trim();
+export function buildOnDemandStream(baseStream, resolveUrl, serviceName, ready = false) {
+  const status = ready
+    ? `⚡ Available in ${serviceName} - press play`
+    : `⏳ On-demand via ${serviceName} - press play to download; retry if still preparing`;
+  const title = `${baseStream.title ?? ''}\n${status}`.trim();
 
   return {
     url:   resolveUrl,
-    name:  `${baseStream.name ?? '⚡ Magnetio'}\n[${serviceName} ⏳]`,
+    name:  `${baseStream.name ?? '⚡ Magnetio'}\n[${serviceName} ${ready ? '⚡' : '⏳'}]`,
     title,
     behaviorHints: {
       ...(baseStream.behaviorHints ?? {}),

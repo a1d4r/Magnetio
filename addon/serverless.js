@@ -197,7 +197,7 @@ router.get('/:configuration/configure', (req, res) => {
   }
 });
 
-// On-demand debrid resolution for services without a bulk cache-check.
+// Resolve selected debrid results, including uncached Real-Debrid candidates.
 // The stream URL emitted by the moch layer points here; we add + unrestrict
 // the torrent now and 302-redirect to the real direct link.
 const onDemandResolveLimiter = rateLimit({
@@ -214,6 +214,14 @@ router.get('/:configuration/resolve/:moch/:infoHash/:fileIdx', onDemandResolveLi
   if (!/^[a-f0-9]{40}$/i.test(infoHash)) {
     return res.status(400).json({ error: 'Invalid infoHash' });
   }
+  if (fileIdx !== 'auto' && !/^\d{1,6}$/.test(fileIdx)) {
+    return res.status(400).json({ error: 'Invalid file index' });
+  }
+  const videoId = req.query.videoId;
+  if (videoId !== undefined && (typeof videoId !== 'string' || !/^(tt\d+|kitsu:\d+)(:\d+:\d+)?$/.test(videoId))) {
+    return res.status(400).json({ error: 'Invalid video ID' });
+  }
+  res.setHeader('Cache-Control', 'private, no-store');
 
   const clientIp = req.ip || req.connection?.remoteAddress;
 
@@ -224,11 +232,13 @@ router.get('/:configuration/resolve/:moch/:infoHash/:fileIdx', onDemandResolveLi
         config,
         moch,
         infoHash.toLowerCase(),
-        parseInt(fileIdx, 10) || 0,
+        fileIdx === 'auto' ? undefined : Number(fileIdx),
+        videoId,
       );
 
       if (!url) {
-        return res.status(502).json({ error: 'Debrid could not cache this torrent in time' });
+        res.setHeader('Retry-After', '10');
+        return res.status(503).json({ error: 'Debrid is not ready to play this file. If it is downloading in your Debrid account, let it finish and retry.' });
       }
 
       res.redirect(302, url);
